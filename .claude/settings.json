@@ -4,7 +4,11 @@
       "Bash(ls \"C:/Users/28170/AppData/Local/Temp/claude/d--OpenSource-MINE-TaskAnchor/\" 2>&1 | head; find \"C:/Users/28170/AppData/Local/Temp/claude\" -name \"bo7zvvq7e*\" 2>&1 | head)",
       "Read(//c/Users/28170/AppData/Local/Temp/claude/d--OpenSource-MINE-TaskAnchor/**)",
       "Read(//c/Users/28170/AppData/Local/Temp/claude/**)",
-      "Bash(powershell -ExecutionPolicy Bypass -Command \"npm run tauri:build:msvc 2>&1 | Out-String\")"
+      "Bash(powershell -ExecutionPolicy Bypass -Command \"npm run tauri:build:msvc 2>&1 | Out-String\")",
+      "Bash(npm run *)",
+      "Bash(tasklist)",
+      "Bash(tasklist /v)",
+      "Bash(tasklist.exe)"
     ]
   }
 }

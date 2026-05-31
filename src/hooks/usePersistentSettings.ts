@@ -9,11 +9,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   focusMinutes: 25,
   reminderMinutes: 5,
   alwaysOnTop: true,
-  autostart: false,
+  expandedWidth: 320,
+  expandedHeight: 124,
 };
 
 function normalizeSettings(value: Partial<AppSettings>): AppSettings {
   const task = typeof value.task === "string" ? value.task.trim() : "";
+  const widthCandidate = Number(value.expandedWidth);
+  const heightCandidate = Number(value.expandedHeight);
 
   return {
     task: task || DEFAULT_SETTINGS.task,
@@ -23,10 +26,12 @@ function normalizeSettings(value: Partial<AppSettings>): AppSettings {
       typeof value.alwaysOnTop === "boolean"
         ? value.alwaysOnTop
         : DEFAULT_SETTINGS.alwaysOnTop,
-    autostart:
-      typeof value.autostart === "boolean"
-        ? value.autostart
-        : DEFAULT_SETTINGS.autostart,
+    expandedWidth: Number.isFinite(widthCandidate)
+      ? clampNumber(widthCandidate, 240, 1200)
+      : DEFAULT_SETTINGS.expandedWidth,
+    expandedHeight: Number.isFinite(heightCandidate)
+      ? clampNumber(heightCandidate, 140, 800)
+      : DEFAULT_SETTINGS.expandedHeight,
   };
 }
 
@@ -71,8 +76,10 @@ export function usePersistentSettings() {
           normalizeSettings({ ...current, alwaysOnTop }),
         );
       },
-      setAutostart(autostart: boolean) {
-        setSettings((current) => normalizeSettings({ ...current, autostart }));
+      setExpandedSize(expandedWidth: number, expandedHeight: number) {
+        setSettings((current) =>
+          normalizeSettings({ ...current, expandedWidth, expandedHeight }),
+        );
       },
     }),
     [],

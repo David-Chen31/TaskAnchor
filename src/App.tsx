@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  GripHorizontal,
+  Anchor,
   Pause,
   Play,
   RotateCcw,
@@ -10,15 +11,21 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePersistentSettings } from "./hooks/usePersistentSettings";
-import type { PromptState, TimerStatus } from "./types";
+import type { TimerStatus } from "./types";
 import { formatCountdown } from "./utils/time";
 
-const REMINDER_VISIBLE_MS = 7000;
+const REMINDER_PULSE_MS = 2200;
+const COMMITMENT_FLASH_MS = 1500;
+const IDLE_COLLAPSE_MS = 0;
+const RESIZE_PERSIST_DEBOUNCE_MS = 400;
+const SETTINGS_PANEL_HEIGHT = 268;
+const COLLAPSED_WIDTH = 240;
+const COLLAPSED_HEIGHT = 30;
+
+type Mode = "collapsed" | "expanded";
 
 function callTauri(command: string, args: Record<string, unknown>) {
-  void invoke(command, args).catch(() => {
-    // Browser preview still works; Tauri-only commands are best effort.
-  });
+  void invoke(command, args).catch(() => {});
 }
 
 function startWindowDrag(event: React.PointerEvent<HTMLElement>) {
@@ -26,9 +33,18 @@ function startWindowDrag(event: React.PointerEvent<HTMLElement>) {
     return;
   }
 
-  void getCurrentWindow().startDragging().catch(() => {
-    // Dragging only exists inside Tauri.
-  });
+  void getCurrentWindow().startDragging().catch(() => {});
+}
+
+function DragStrip({ className = "" }: { className?: string }) {
+  return (
+    <div
+      data-tauri-drag-region
+      onPointerDown={startWindowDrag}
+      title="拖动窗口"
+      className={`cursor-grab select-none active:cursor-grabbing ${className}`}
+    />
+  );
 }
 
 function IconButton({
@@ -53,29 +69,12 @@ function IconButton({
       onClick={onClick}
       className={`grid h-7 w-7 place-items-center rounded-md transition disabled:cursor-not-allowed disabled:opacity-40 ${
         quiet
-          ? "text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+          ? "text-slate-400 hover:bg-stone-100 hover:text-slate-700"
           : "border border-stone-200 bg-white text-slate-700 shadow-sm hover:bg-teal-50 hover:text-teal-800"
       }`}
     >
       {children}
     </button>
-  );
-}
-
-function DragHandle({ label = "拖动窗口" }: { label?: string }) {
-  return (
-    <div
-      data-tauri-drag-region
-      title={label}
-      onPointerDown={startWindowDrag}
-      className="flex h-7 flex-1 cursor-grab select-none items-center text-slate-300 active:cursor-grabbing"
-    >
-      <GripHorizontal
-        size={18}
-        aria-hidden="true"
-        className="pointer-events-none"
-      />
-    </div>
   );
 }
 
@@ -107,89 +106,31 @@ function Toggle({
   );
 }
 
-function PromptOverlay({
-  prompt,
-  onClose,
-  onContinue,
-  onChangeTask,
-}: {
-  prompt: PromptState | null;
-  onClose: () => void;
-  onContinue: () => void;
-  onChangeTask: () => void;
-}) {
-  if (!prompt) {
-    return null;
-  }
-
-  return (
-    <div className="absolute inset-x-2 bottom-2 z-20 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-slate-800 shadow-sm">
-      <div className="flex items-start gap-2">
-        <p className="min-w-0 flex-1 text-[12px] font-medium leading-snug">
-          {prompt.message}
-        </p>
-        <button
-          type="button"
-          title="关闭"
-          aria-label="关闭"
-          onClick={onClose}
-          className="grid h-5 w-5 shrink-0 place-items-center rounded text-slate-500 hover:bg-amber-100 hover:text-slate-800"
-        >
-          <X size={14} />
-        </button>
-      </div>
-
-      {prompt.kind === "complete" && (
-        <div className="mt-2 flex gap-2">
-          <button
-            type="button"
-            onClick={onContinue}
-            className="h-7 rounded-md bg-teal-700 px-3 text-[12px] font-medium text-white hover:bg-teal-800"
-          >
-            继续
-          </button>
-          <button
-            type="button"
-            onClick={onChangeTask}
-            className="h-7 rounded-md border border-stone-200 bg-white px-3 text-[12px] font-medium text-slate-700 hover:bg-stone-50"
-          >
-            换任务
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function SettingsPanel({
   task,
   focusMinutes,
   reminderMinutes,
   alwaysOnTop,
-  autostart,
   onTaskChange,
   onFocusMinutesChange,
   onReminderMinutesChange,
   onAlwaysOnTopChange,
-  onAutostartChange,
   onClose,
 }: {
   task: string;
   focusMinutes: number;
   reminderMinutes: number;
   alwaysOnTop: boolean;
-  autostart: boolean;
   onTaskChange: (task: string) => void;
   onFocusMinutesChange: (minutes: number) => void;
   onReminderMinutesChange: (minutes: number) => void;
   onAlwaysOnTopChange: (enabled: boolean) => void;
-  onAutostartChange: (enabled: boolean) => void;
   onClose: () => void;
 }) {
   return (
     <div className="flex h-full flex-col px-3 py-2">
       <div className="mb-2 flex h-7 items-center gap-2">
-        <DragHandle />
+        <DragStrip className="flex h-full flex-1" />
         <span className="shrink-0 text-[12px] font-medium text-slate-500">
           设置
         </span>
@@ -247,17 +188,9 @@ function SettingsPanel({
           <Toggle checked={alwaysOnTop} onChange={onAlwaysOnTopChange} />
         </div>
 
-        <div
-          title="MVP 预留接口"
-          className="flex items-center justify-between py-1 text-slate-500"
-        >
-          <span className="font-medium">开机自启动</span>
-          <Toggle
-            checked={autostart}
-            onChange={onAutostartChange}
-            disabled
-          />
-        </div>
+        <p className="pt-1 text-[11px] leading-snug text-slate-400">
+          Ctrl+Alt+J 可在任何应用里把窗口召唤到最前。
+        </p>
       </div>
     </div>
   );
@@ -270,7 +203,7 @@ export default function App() {
     setFocusMinutes,
     setReminderMinutes,
     setAlwaysOnTop,
-    setAutostart,
+    setExpandedSize,
   } = usePersistentSettings();
 
   const initialSeconds = useMemo(
@@ -282,12 +215,24 @@ export default function App() {
   const [editing, setEditing] = useState(false);
   const [draftTask, setDraftTask] = useState(settings.task);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [prompt, setPrompt] = useState<PromptState | null>(null);
+  const [completePromptOpen, setCompletePromptOpen] = useState(false);
+  const [reminderPulse, setReminderPulse] = useState(false);
+  const [commitmentFlash, setCommitmentFlash] = useState(false);
+  const [mode, setMode] = useState<Mode>("expanded");
 
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const lastInteractionAtRef = useRef(Date.now());
-  const lastReminderAtRef = useRef(0);
-  const focusLostAtRef = useRef<number | null>(null);
+  const nextReminderAtRef = useRef<number>(
+    Date.now() + settings.reminderMinutes * 60 * 1000,
+  );
+  const resizePersistTimerRef = useRef<number | null>(null);
+  const lastRequestedSizeRef = useRef<{ width: number; height: number }>({
+    width: settings.expandedWidth,
+    height: settings.expandedHeight,
+  });
+  const guardRef = useRef(false);
+
+  const guardForceExpanded = editing || settingsOpen || completePromptOpen;
+  guardRef.current = guardForceExpanded;
 
   useEffect(() => {
     if (timerStatus === "idle") {
@@ -299,9 +244,72 @@ export default function App() {
     callTauri("set_always_on_top", { enabled: settings.alwaysOnTop });
   }, [settings.alwaysOnTop]);
 
+  // Mode → window size sync
   useEffect(() => {
-    callTauri("set_settings_open", { open: settingsOpen });
-  }, [settingsOpen]);
+    if (mode === "collapsed") {
+      lastRequestedSizeRef.current = {
+        width: COLLAPSED_WIDTH,
+        height: COLLAPSED_HEIGHT,
+      };
+      callTauri("set_window_size", {
+        width: COLLAPSED_WIDTH,
+        height: COLLAPSED_HEIGHT,
+      });
+    } else {
+      const height = settingsOpen
+        ? SETTINGS_PANEL_HEIGHT
+        : settings.expandedHeight;
+      lastRequestedSizeRef.current = {
+        width: settings.expandedWidth,
+        height,
+      };
+      callTauri("set_window_size", {
+        width: settings.expandedWidth,
+        height,
+      });
+    }
+  }, [
+    mode,
+    settings.expandedWidth,
+    settings.expandedHeight,
+    settingsOpen,
+  ]);
+
+  // Idle watch (Rust polls global cursor; emits taskanchor://idle after 1s outside)
+  useEffect(() => {
+    if (mode === "expanded" && !guardForceExpanded) {
+      callTauri("enable_idle_watch", { idleMs: IDLE_COLLAPSE_MS });
+    } else {
+      callTauri("disable_idle_watch", {});
+    }
+  }, [mode, guardForceExpanded]);
+
+  // Listen for idle event from Rust polling thread
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+
+    listen("taskanchor://idle", () => {
+      if (guardRef.current) {
+        return;
+      }
+      setMode((current) => (current === "expanded" ? "collapsed" : current));
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // Force expanded while any modal-like UI is open
+  useEffect(() => {
+    if (guardForceExpanded && mode !== "expanded") {
+      setMode("expanded");
+    }
+  }, [guardForceExpanded, mode]);
 
   useEffect(() => {
     if (editing) {
@@ -319,10 +327,7 @@ export default function App() {
       setRemainingSeconds((current) => {
         if (current <= 1) {
           setTimerStatus("finished");
-          setPrompt({
-            kind: "complete",
-            message: "这一轮完成了吗？继续当前任务还是换任务？",
-          });
+          setCompletePromptOpen(true);
           return 0;
         }
 
@@ -333,76 +338,125 @@ export default function App() {
     return () => window.clearInterval(tick);
   }, [timerStatus]);
 
-  useEffect(() => {
-    if (!prompt || prompt.kind !== "reminder") {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      setPrompt((current) => (current?.kind === "reminder" ? null : current));
-    }, REMINDER_VISIBLE_MS);
-
-    return () => window.clearTimeout(timeout);
-  }, [prompt]);
+  function rescheduleNextReminder() {
+    nextReminderAtRef.current =
+      Date.now() + settings.reminderMinutes * 60 * 1000;
+  }
 
   useEffect(() => {
-    const markInteraction = () => {
-      lastInteractionAtRef.current = Date.now();
-    };
-
-    const markFocus = () => {
-      focusLostAtRef.current = null;
-      markInteraction();
-    };
-
-    const markBlur = () => {
-      focusLostAtRef.current = Date.now();
-    };
-
-    window.addEventListener("pointerdown", markInteraction, true);
-    window.addEventListener("keydown", markInteraction, true);
-    window.addEventListener("focus", markFocus);
-    window.addEventListener("blur", markBlur);
-
-    return () => {
-      window.removeEventListener("pointerdown", markInteraction, true);
-      window.removeEventListener("keydown", markInteraction, true);
-      window.removeEventListener("focus", markFocus);
-      window.removeEventListener("blur", markBlur);
-    };
-  }, []);
+    rescheduleNextReminder();
+  }, [settings.reminderMinutes, settings.task]);
 
   useEffect(() => {
     const checker = window.setInterval(() => {
-      if (settingsOpen || editing || prompt?.kind === "complete") {
+      if (settingsOpen || editing || completePromptOpen) {
         return;
       }
 
-      const now = Date.now();
-      const reminderMs = settings.reminderMinutes * 60 * 1000;
-      const idleTooLong = now - lastInteractionAtRef.current >= reminderMs;
-      const focusAwayTooLong =
-        focusLostAtRef.current !== null &&
-        now - focusLostAtRef.current >= reminderMs;
-      const cooldownPassed = now - lastReminderAtRef.current >= reminderMs;
-
-      if ((idleTooLong || focusAwayTooLong) && cooldownPassed) {
-        lastReminderAtRef.current = now;
-        setPrompt({
-          kind: "reminder",
-          message: `你现在要做的是：${settings.task}`,
-        });
+      if (Date.now() >= nextReminderAtRef.current) {
+        rescheduleNextReminder();
+        setReminderPulse(true);
       }
     }, 1000);
 
     return () => window.clearInterval(checker);
-  }, [
-    editing,
-    prompt?.kind,
-    settings.reminderMinutes,
-    settings.task,
-    settingsOpen,
-  ]);
+  }, [completePromptOpen, editing, settingsOpen]);
+
+  useEffect(() => {
+    if (!reminderPulse) {
+      return;
+    }
+
+    const timeout = window.setTimeout(
+      () => setReminderPulse(false),
+      REMINDER_PULSE_MS,
+    );
+
+    return () => window.clearTimeout(timeout);
+  }, [reminderPulse]);
+
+  useEffect(() => {
+    if (!commitmentFlash) {
+      return;
+    }
+
+    const timeout = window.setTimeout(
+      () => setCommitmentFlash(false),
+      COMMITMENT_FLASH_MS,
+    );
+
+    return () => window.clearTimeout(timeout);
+  }, [commitmentFlash]);
+
+  // Global shortcut → expand & focus
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+
+    listen("taskanchor://summon", () => {
+      setMode("expanded");
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // Persist user-driven resize of expanded window
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    getCurrentWindow()
+      .onResized(({ payload }) => {
+        if (mode !== "expanded" || settingsOpen) {
+          return;
+        }
+
+        const scale = window.devicePixelRatio || 1;
+        const logicalWidth = payload.width / scale;
+        const logicalHeight = payload.height / scale;
+        const last = lastRequestedSizeRef.current;
+
+        if (
+          Math.abs(logicalWidth - last.width) < 2 &&
+          Math.abs(logicalHeight - last.height) < 2
+        ) {
+          return;
+        }
+
+        if (resizePersistTimerRef.current !== null) {
+          window.clearTimeout(resizePersistTimerRef.current);
+        }
+
+        resizePersistTimerRef.current = window.setTimeout(() => {
+          setExpandedSize(
+            Math.round(logicalWidth),
+            Math.round(logicalHeight),
+          );
+        }, RESIZE_PERSIST_DEBOUNCE_MS);
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      if (resizePersistTimerRef.current !== null) {
+        window.clearTimeout(resizePersistTimerRef.current);
+        resizePersistTimerRef.current = null;
+      }
+    };
+  }, [mode, settingsOpen, setExpandedSize]);
 
   function commitTask() {
     setTask(draftTask);
@@ -424,24 +478,30 @@ export default function App() {
       setRemainingSeconds(initialSeconds);
     }
 
-    setPrompt(null);
+    setReminderPulse(false);
+    setCommitmentFlash(true);
+    rescheduleNextReminder();
     setTimerStatus("running");
   }
 
   function resetTimer() {
     setTimerStatus("idle");
     setRemainingSeconds(initialSeconds);
-    setPrompt(null);
+    setReminderPulse(false);
+    setCompletePromptOpen(false);
+    rescheduleNextReminder();
   }
 
   function continueTask() {
     setRemainingSeconds(initialSeconds);
+    setCompletePromptOpen(false);
+    rescheduleNextReminder();
+    setCommitmentFlash(true);
     setTimerStatus("running");
-    setPrompt(null);
   }
 
   function changeTaskAfterRound() {
-    setPrompt(null);
+    setCompletePromptOpen(false);
     setTimerStatus("idle");
     setRemainingSeconds(initialSeconds);
     setEditing(true);
@@ -452,16 +512,96 @@ export default function App() {
     callTauri("set_always_on_top", { enabled });
   }
 
+  function collapseIfAllowed() {
+    if (mode === "expanded" && !guardRef.current) {
+      setMode("collapsed");
+    }
+  }
+
+  const edgeColor = reminderPulse
+    ? "bg-amber-400"
+    : timerStatus === "running"
+      ? "bg-teal-500"
+      : timerStatus === "finished"
+        ? "bg-amber-400"
+        : timerStatus === "paused"
+          ? "bg-stone-400"
+          : "bg-stone-200";
+
+  const titleClass = commitmentFlash
+    ? "scale-[1.18] text-teal-700"
+    : reminderPulse
+      ? "scale-[1.03] text-amber-800"
+      : "scale-100 text-slate-950";
+
+  if (mode === "collapsed") {
+    return (
+      <div className="h-screen w-screen overflow-hidden bg-transparent p-[3px] font-sans text-slate-900">
+        <section className="relative h-full overflow-hidden rounded-full border border-black/[0.06] bg-stone-50/[0.85] shadow-quiet backdrop-blur-lg">
+          <div
+            aria-hidden
+            className={`pointer-events-none absolute inset-x-0 top-0 h-[2px] transition-colors duration-500 ${edgeColor}`}
+          />
+          <div
+            className={`flex h-full items-center transition-colors duration-500 ${
+              reminderPulse ? "bg-amber-100/60" : "bg-transparent"
+            }`}
+          >
+            <div
+              data-tauri-drag-region
+              onPointerDown={startWindowDrag}
+              title="拖动以移动窗口"
+              className="flex h-full w-12 shrink-0 cursor-grab items-center justify-center bg-stone-200/50 transition-colors hover:bg-stone-300/60 active:cursor-grabbing"
+            >
+              <Anchor
+                size={14}
+                aria-hidden
+                className="pointer-events-none text-teal-700"
+              />
+            </div>
+            <button
+              type="button"
+              title="点击展开窗口"
+              aria-label="展开窗口"
+              onClick={() => setMode("expanded")}
+              className="flex min-w-0 flex-1 items-center gap-1.5 px-2.5 text-left hover:bg-stone-100/40"
+            >
+              <span
+                className={`min-w-0 flex-1 truncate text-[12px] font-medium leading-none transition-colors ${
+                  reminderPulse ? "text-amber-800" : "text-slate-700"
+                }`}
+              >
+                {settings.task}
+              </span>
+              <span className="shrink-0 tabular-nums text-[12px] font-medium leading-none text-[#62572f]">
+                {formatCountdown(remainingSeconds)}
+              </span>
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   return (
-    <div className="h-screen w-screen overflow-hidden bg-transparent p-1.5 font-sans text-slate-900">
-      <section className="relative h-full overflow-hidden rounded-xl border border-black/[0.08] bg-white/[0.94] shadow-quiet backdrop-blur-lg">
+    <div
+      className="h-screen w-screen overflow-hidden bg-transparent p-1.5 font-sans text-slate-900"
+      onPointerLeave={collapseIfAllowed}
+    >
+      <section
+        className="group relative h-full overflow-hidden rounded-xl border border-black/[0.06] bg-stone-50/[0.85] shadow-quiet backdrop-blur-lg"
+      >
+        <div
+          aria-hidden
+          className={`pointer-events-none absolute inset-x-0 top-0 h-[2px] transition-colors duration-500 ${edgeColor}`}
+        />
+
         {settingsOpen ? (
           <SettingsPanel
             task={settings.task}
             focusMinutes={settings.focusMinutes}
             reminderMinutes={settings.reminderMinutes}
             alwaysOnTop={settings.alwaysOnTop}
-            autostart={settings.autostart}
             onTaskChange={setTask}
             onFocusMinutesChange={(minutes) => {
               setTimerStatus("idle");
@@ -469,23 +609,19 @@ export default function App() {
             }}
             onReminderMinutesChange={setReminderMinutes}
             onAlwaysOnTopChange={handleAlwaysOnTopChange}
-            onAutostartChange={setAutostart}
             onClose={() => setSettingsOpen(false)}
           />
         ) : (
-          <div className="flex h-full flex-col gap-1.5 px-3 py-2">
-            <div className="flex h-6 items-center gap-2">
-              <DragHandle />
-              <IconButton label="设置" onClick={() => setSettingsOpen(true)} quiet>
-                <Settings size={15} />
-              </IconButton>
-            </div>
+          <div className="relative flex h-full flex-col gap-1 px-3 pb-2 pt-3">
+            <DragStrip className="absolute inset-x-0 top-0 h-7" />
 
-            <div className="flex min-h-0 flex-1 flex-col justify-center">
+            <div className="flex flex-col">
               {editing ? (
                 <div className="space-y-1">
                   <input
                     ref={inputRef}
+                    aria-label="编辑当前任务"
+                    placeholder="写下你现在要做的一件事"
                     value={draftTask}
                     onChange={(event) => setDraftTask(event.target.value)}
                     onKeyDown={(event) => {
@@ -498,7 +634,7 @@ export default function App() {
                       }
                     }}
                     onBlur={commitTask}
-                    className="h-9 w-full rounded-md border border-teal-600 bg-white px-2 text-[15px] font-semibold leading-none text-slate-950 outline-none"
+                    className="h-9 w-full rounded-md border border-teal-600 bg-white px-2 text-[18px] font-semibold leading-none text-slate-950 outline-none"
                   />
                   <p className="px-0.5 text-[10px] text-slate-400">
                     Enter 保存 · Esc 取消
@@ -509,17 +645,16 @@ export default function App() {
                   type="button"
                   title="编辑当前任务"
                   onClick={() => setEditing(true)}
-                  className="block w-full min-w-0 rounded-md text-left text-slate-950"
+                  className={`block w-full min-w-0 origin-left rounded-md text-left transition-all duration-300 ease-out ${titleClass}`}
                 >
-                  <span className="block text-[11px] font-medium leading-tight text-teal-800">
-                    现在只做：
-                  </span>
-                  <span className="mt-1 block truncate text-[18px] font-semibold leading-tight">
+                  <span className="block truncate text-[22px] font-semibold leading-snug tracking-tight">
                     {settings.task}
                   </span>
                 </button>
               )}
             </div>
+
+            <DragStrip className="min-h-[8px] flex-1" />
 
             <div className="flex h-9 items-center justify-between gap-3">
               <div className="tabular-nums text-[22px] font-semibold leading-none text-[#62572f]">
@@ -527,9 +662,13 @@ export default function App() {
               </div>
 
               <div className="flex shrink-0 items-center gap-1.5">
-                <IconButton label="重置" onClick={resetTimer} quiet>
-                  <RotateCcw size={15} />
-                </IconButton>
+                {(timerStatus === "paused" ||
+                  timerStatus === "finished" ||
+                  remainingSeconds !== initialSeconds) && (
+                  <IconButton label="重置" onClick={resetTimer} quiet>
+                    <RotateCcw size={15} />
+                  </IconButton>
+                )}
                 <button
                   type="button"
                   onClick={startOrPause}
@@ -549,15 +688,54 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            <button
+              type="button"
+              title="设置"
+              aria-label="设置"
+              onClick={() => setSettingsOpen(true)}
+              className="absolute right-1.5 top-1.5 z-10 grid h-5 w-5 place-items-center rounded text-slate-300 opacity-50 transition hover:bg-stone-100 hover:text-slate-700 group-hover:opacity-100"
+            >
+              <Settings size={13} />
+            </button>
           </div>
         )}
 
-        <PromptOverlay
-          prompt={prompt}
-          onClose={() => setPrompt(null)}
-          onContinue={continueTask}
-          onChangeTask={changeTaskAfterRound}
-        />
+        {completePromptOpen && (
+          <div className="absolute inset-x-2 bottom-2 z-20 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-slate-800 shadow-sm">
+            <div className="flex items-start gap-2">
+              <p className="min-w-0 flex-1 text-[12px] font-medium leading-snug">
+                这一轮完成了吗？继续当前任务还是换任务？
+              </p>
+              <button
+                type="button"
+                title="关闭"
+                aria-label="关闭"
+                onClick={() => setCompletePromptOpen(false)}
+                className="grid h-5 w-5 shrink-0 place-items-center rounded text-slate-500 hover:bg-amber-100 hover:text-slate-800"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={continueTask}
+                className="h-7 rounded-md bg-teal-700 px-3 text-[12px] font-medium text-white hover:bg-teal-800"
+              >
+                继续
+              </button>
+              <button
+                type="button"
+                onClick={changeTaskAfterRound}
+                className="h-7 rounded-md border border-stone-200 bg-white px-3 text-[12px] font-medium text-slate-700 hover:bg-stone-50"
+              >
+                换任务
+              </button>
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );
