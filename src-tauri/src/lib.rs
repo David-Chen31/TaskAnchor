@@ -5,6 +5,8 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewWindow};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -162,6 +164,62 @@ pub fn run() {
 
             place_near_top_right(&window)?;
             app.global_shortcut().register(summon_shortcut)?;
+
+            let show_item = MenuItem::with_id(app, "show", "显示", true, None::<&str>)?;
+            let hide_item = MenuItem::with_id(app, "hide", "隐藏", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &hide_item, &quit_item])?;
+
+            let icon = app
+                .default_window_icon()
+                .expect("default window icon should be configured")
+                .clone();
+
+            TrayIconBuilder::new()
+                .icon(icon)
+                .tooltip("TaskAnchor")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "hide" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(w) = app.get_webview_window("main") {
+                            let visible = w.is_visible().unwrap_or(false);
+                            if visible {
+                                let _ = w.hide();
+                            } else {
+                                let _ = w.show();
+                                let _ = w.unminimize();
+                                let _ = w.set_focus();
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
